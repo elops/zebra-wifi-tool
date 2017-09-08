@@ -98,5 +98,5 @@ try:
 	out_endpoint.write(CONNECT_CFG)
 	print("Printer configured with : \n{}".format(CONNECT_CFG))
 except:
-	sys.stderr.write("Error occurred while trying to configure printer, exiting...")
+	sys.stderr.write("Error occurred while trying to configure printer, exiting...\n")
 	sys.exit(1)
