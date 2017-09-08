@@ -8,7 +8,7 @@ import traceback
 from passlib.utils import pbkdf2
 
 if os.geteuid() != 0:
-	sys.stderr.write("Pyusb this tool depens on requires root privileges, please run as root. Exiting...")
+	sys.stderr.write("pyusb this tool depends on requires root privileges, please run as root. Exiting...")
 	sys.exit(1)
 
 
