@@ -87,7 +87,7 @@ CONFIG_CMD = """
 
 if device.is_kernel_driver_active(INTERFACE_ID):
 	print "Detaching kernel driver..."
-	device.detach_kernel_driver(INTERFACE_ID) 
+	device.detach_kernel_driver(INTERFACE_ID)
 
 try:
     configuration = device.get_active_configuration()
