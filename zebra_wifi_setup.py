@@ -47,7 +47,7 @@ WPA_PSK_RAWKEY = binascii.hexlify(WPA_PSK_KEY).decode("utf-8").upper()
 # Official ZPL-ZBI2 Manual
 # https://www.zebra.com/content/dam/zebra/manuals/en-us/software/zpl-zbi2-pm-en.pdf
 
-CONNECT_CFG = """
+CONFIG_CMD = """
 ^XA
 ^WIA
 ^NC2
@@ -66,13 +66,18 @@ CONNECT_CFG = """
 ^XA
 ^JUS
 ^XZ
-""".format(SSID, WPA_PSK_RAWKEY)
-
-device = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
-
-if device is None:
-	sys.stderr.write("Could not find Zebra printer attached. Exiting...")
-	sys.exit(1)
+! U1 setvar "media.type" "journal"
+! U1 setvar "media.speed" "6.0"
+! U1 setvar "media.thermal_mode" "DT"
+! U1 setvar "ezpl.print_width" "609"
+! U1 setvar "ezpl.print_method" "direct thermal"
+! U1 setvar "alerts.configured" "SGD SET,SDK,Y,N,WEBLINK.IP.CONN1,0,N,capture.channel1.data.raw|ALL MESSAGES,SDK,Y,Y,WEBLINK.IP.CONN1,0,N,"
+! U1 setvar "capture.channel1.delimiter" "\\015\\012"
+! U1 setvar "capture.channel1.max_length" "10"
+! U1 setvar "capture.channel1.port" "bt"
+! U1 setvar "weblink.ip.conn1.location" "{2}"
+! U1 setvar "device.reset" "true"
+""".format(SSID, WPA_PSK_RAWKEY, WEBLINK1_URL)
 
 if device.is_kernel_driver_active(INTERFACE_ID):
 	print "Detaching kernel driver..."
@@ -95,8 +100,8 @@ out_endpoint = interface[OUT_ENDPOINT_ID]
 in_endpoint = interface[IN_ENDPOINT_ID]
 
 try:
-	out_endpoint.write(CONNECT_CFG)
-	print("Printer configured with : \n{}".format(CONNECT_CFG))
+	out_endpoint.write(CONFIG_CMD)
+	print("Printer configured with : \n{}".format(CONFIG_CMD))
 except:
 	sys.stderr.write("Error occurred while trying to configure printer, exiting...\n")
 	sys.exit(1)
