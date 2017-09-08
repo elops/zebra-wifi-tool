@@ -36,6 +36,9 @@ WPA_PSK_KEY = pbkdf2.pbkdf2(str.encode(WPA_SECRET), str.encode(SSID), 4096, 32)
 WPA_PSK_RAWKEY = binascii.hexlify(WPA_PSK_KEY).decode("utf-8").upper()
 
 # Connect string template from Zebra configuration tool for win
+# Official ZPL-ZBI2 Manual
+# https://www.zebra.com/content/dam/zebra/manuals/en-us/software/zpl-zbi2-pm-en.pdf
+
 CONNECT_CFG = """
 ^XA
 ^WIA
@@ -57,13 +60,11 @@ CONNECT_CFG = """
 ^XZ
 """.format(SSID, WPA_PSK_RAWKEY)
 
-
 device = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
 
 if device is None:
 	sys.stderr.write("Could not find Zebra printer attached. Exiting...")
 	sys.exit(1)
-
 
 if device.is_kernel_driver_active(INTERFACE_ID):
 	print "Detaching kernel driver..."
@@ -91,4 +92,3 @@ try:
 except:
 	sys.stderr.write("Error occurred while trying to configure printer, exiting...")
 	sys.exit(1)
-
