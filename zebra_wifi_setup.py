@@ -8,9 +8,8 @@ import traceback
 from passlib.utils import pbkdf2
 
 if os.geteuid() != 0:
-	sys.stderr.write("pyusb this tool depends on requires root privileges, please run as root. Exiting...")
+	sys.stderr.write("pyusb this tool depends on requires root privileges, please run as root. Exiting...\n")
 	sys.exit(1)
-
 
 VENDOR_ID = 0x0a5f
 PRODUCT_ID = 0x0120
@@ -19,17 +18,26 @@ SETTING_ID = 0x0
 OUT_ENDPOINT_ID = 0
 IN_ENDPOINT_ID = 1
 
+device = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
+
+if device is None:
+	sys.stderr.write("Could not find Zebra printer attached. Exiting...\n")
+	sys.exit(1)
+
 SSID = raw_input("Enter WiFi SSID : ")
 if not len(SSID):
-	sys.stderr.write("Must provide WiFi SSID. Exiting...")
+	sys.stderr.write("Must provide WiFi SSID. Exiting...\n")
 	sys.exit(1)
 
 WPA_SECRET = raw_input("Enter WiFi secret : ")
-
 if not len(WPA_SECRET):
-	sys.stderr.write("Must provide WiFi secret. Exiting...")
+	sys.stderr.write("Must provide WiFi secret. Exiting...\n")
 	sys.exit(1)
 
+WEBLINK1_URL = raw_input("Enter Weblink1 URL : ")
+if not len(WEBLINK1_URL):
+	sys.stderr.write("Must provide Weblink1 URL. Exiting...\n")
+	sys.exit(1)
 
 # https://github.com/julianofischer/python-wpa-psk-rawkey-gen
 WPA_PSK_KEY = pbkdf2.pbkdf2(str.encode(WPA_SECRET), str.encode(SSID), 4096, 32)
