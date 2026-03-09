@@ -5,6 +5,7 @@ import os
 import sys
 import binascii
 import traceback
+import time
 from passlib.utils import pbkdf2
 
 if os.geteuid() != 0:
@@ -43,13 +44,31 @@ DEVICE_LOCATION = input("Enter device location : ")
 if not len(DEVICE_LOCATION):
     DEVICE_LOCATION = "Default Location"
 
+# Prompt for the certificate
+CERT_PATH = input("Enter path to CA cert file (e.g., ca.pem) [Leave blank to skip]: ")
+cert_payload = b""
+
+if CERT_PATH:
+    if os.path.exists(CERT_PATH):
+        with open(CERT_PATH, "r") as f:
+            cert_data = f.read()
+            
+        # Calculate the exact byte size of the certificate string
+        cert_size = len(cert_data.encode('utf-8'))
+        
+        # Construct the exact ~DY command
+        dy_command = f"~DYE:WEBLINK1_CA,B,NRD,{cert_size},,{cert_data}\n"
+        cert_payload = dy_command.encode('utf-8')
+    else:
+        sys.stderr.write(f"Certificate file not found at {CERT_PATH}. Exiting...\n")
+        sys.exit(1)
+
+
 # https://github.com/julianofischer/python-wpa-psk-rawkey-gen
 WPA_PSK_KEY = pbkdf2.pbkdf2(str.encode(WPA_SECRET), str.encode(SSID), 4096, 32)
 WPA_PSK_RAWKEY = binascii.hexlify(WPA_PSK_KEY).decode("utf-8").upper()
 
-# Connect string template from Zebra configuration tool for win
-# Official ZPL-ZBI2 Manual
-# https://www.zebra.com/content/dam/zebra/manuals/en-us/software/zpl-zbi2-pm-en.pdf
+# Connect string template WITHOUT the device.reset command at the end
 CONFIG_CMD = """
 ^XA
 ^WIA
@@ -82,7 +101,6 @@ CONFIG_CMD = """
 ! U1 setvar "weblink.zebra_connector.enable" "off"
 ! U1 setvar "device.location" "{3}"
 ! U1 setvar "device.friendly_name" "ZD421"
-! U1 setvar "device.reset" "true"
 """.format(SSID, WPA_PSK_RAWKEY, WEBLINK1_URL, DEVICE_LOCATION)
 
 if device.is_kernel_driver_active(INTERFACE_ID):
@@ -98,16 +116,48 @@ except:
     print('-' * 60)
     sys.exit(1)
 
-# Some ideas and navigation tips from
-# https://gist.github.com/mvidner/04ffe0bbea0fc24182772a196f238918
 interface = configuration[(INTERFACE_ID, SETTING_ID)]
 out_endpoint = interface[OUT_ENDPOINT_ID]
 in_endpoint = interface[IN_ENDPOINT_ID]
 
 try:
-    out_endpoint.write(CONFIG_CMD.encode())
-    print("Printer configured with : \n{}".format(CONFIG_CMD))
+    # 1. Send configuration and certificate payload
+    print("Sending configuration and certificate...")
+    initial_payload = CONFIG_CMD.encode('utf-8')
+    if cert_payload:
+        initial_payload += cert_payload
+        
+    out_endpoint.write(initial_payload)
+    
+    # 2. Verify certificate if one was uploaded
+    if cert_payload:
+        print("Waiting 2 seconds for the printer to process the certificate...")
+        time.sleep(2)
+        
+        print("Verifying certificate on the printer...")
+        out_endpoint.write(b'! U1 getvar "file.dir"\r\n')
+        
+        try:
+            # Read back from the IN endpoint (size 8192, timeout 5000ms)
+            response = in_endpoint.read(8192, timeout=5000)
+            response_text = bytes(response).decode('utf-8', errors='ignore')
+            
+            if "WEBLINK1_CA.NRD" in response_text:
+                print("SUCCESS: WEBLINK1_CA.NRD found on the printer's drive.")
+            else:
+                print("WARNING: WEBLINK1_CA.NRD was not found in the directory listing.")
+                print(f"Printer response: {response_text.strip()}")
+        except usb.core.USBTimeoutError:
+            print("WARNING: Timed out waiting for verification response from the printer.")
+
+    # 3. Trigger the reboot
+    print("Sending reset command to reboot the device...")
+    reset_command = b'\n! U1 setvar "device.reset" "true"\n'
+    out_endpoint.write(reset_command)
+    
+    print("Provisioning script completed.")
+
 except Exception as e:
     sys.stderr.write("Error occurred while trying to configure printer, exiting...\n")
-    sys.stderr.write("{}".format(e))
+    sys.stderr.write("{}\n".format(e))
     sys.exit(1)
