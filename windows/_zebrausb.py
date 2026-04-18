@@ -72,27 +72,58 @@ def find_printer(backend, product_id=None):
     return usb.core.find(**kwargs)
 
 
+_PID_RE = re.compile(r"VID_0A5F&PID_([0-9A-Fa-f]{4})", re.IGNORECASE)
+_NO_WINDOW = 0x08000000  # subprocess creationflags: CREATE_NO_WINDOW
+
+
+def _pids_from_text(text):
+    seen = []
+    for m in _PID_RE.finditer(text):
+        pid = int(m.group(1), 16)
+        if pid not in seen:
+            seen.append(pid)
+    return seen
+
+
+def _pnp_via_pnputil():
+    r = subprocess.run(
+        ["pnputil.exe", "/enum-devices", "/connected"],
+        capture_output=True, text=True, timeout=30, creationflags=_NO_WINDOW,
+    )
+    return _pids_from_text(r.stdout)
+
+
+def _pnp_via_powershell():
+    r = subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         "Get-PnpDevice -PresentOnly | "
+         "Where-Object { $_.InstanceId -like '*VID_0A5F*' } | "
+         "Select-Object -ExpandProperty InstanceId"],
+        capture_output=True, text=True, timeout=90, creationflags=_NO_WINDOW,
+    )
+    return _pids_from_text(r.stdout)
+
+
 def find_zebra_pid_via_pnp(want_pid=None):
-    """Return the PID of a connected Zebra via Windows PnP (works pre-driver-bind)."""
-    try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "Get-PnpDevice -PresentOnly | "
-             "Where-Object { $_.InstanceId -like '*VID_0A5F*' } | "
-             "Select-Object -ExpandProperty InstanceId"],
-            capture_output=True, text=True, timeout=15,
-            creationflags=0x08000000,  # CREATE_NO_WINDOW
-        )
-        candidates = []
-        for line in r.stdout.splitlines():
-            m = re.search(r"VID_0A5F&PID_([0-9A-Fa-f]{4})", line)
-            if m:
-                candidates.append(int(m.group(1), 16))
-        if want_pid is not None:
-            return want_pid if want_pid in candidates else None
-        return candidates[0] if candidates else None
-    except Exception as e:
-        sys.stderr.write("PnP enumeration failed: {}\n".format(e))
+    """Return the PID of a connected Zebra via Windows PnP (works pre-driver-bind).
+
+    Tries pnputil first (fast native tool), then falls back to PowerShell's
+    Get-PnpDevice (slow cold start on first-run machines due to AMSI + JIT).
+    """
+    last_err = None
+    for method in (_pnp_via_pnputil, _pnp_via_powershell):
+        try:
+            candidates = method()
+        except Exception as e:
+            last_err = e
+            sys.stderr.write("{} failed: {}\n".format(method.__name__, e))
+            continue
+        if candidates:
+            if want_pid is not None:
+                return want_pid if want_pid in candidates else None
+            return candidates[0]
+    if last_err is not None:
+        sys.stderr.write("All PnP enumeration methods failed.\n")
     return None
 
 
