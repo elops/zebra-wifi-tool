@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 VID = 0x0A5F
@@ -132,6 +133,17 @@ def install_winusb_driver(pid):
     if not os.path.exists(wdi):
         sys.stderr.write("wdi-simple.exe missing at {}\n".format(wdi))
         return False
+    # libwdi extracts the WDF co-installer DLLs under --dest (default
+    # "usb_driver", relative to CWD). When the process is UAC-elevated via
+    # ShellExecute "runas", CWD is C:\Windows\System32 and creating the
+    # nested amd64\ subdir there trips ERROR_PATH_NOT_FOUND (3).  Pin to a
+    # clean, writable temp directory to sidestep that entirely.
+    dest = os.path.join(tempfile.gettempdir(), "zebra-wdi-driver")
+    try:
+        os.makedirs(dest, exist_ok=True)
+    except Exception as e:
+        sys.stderr.write("Could not create {}: {}\n".format(dest, e))
+        return False
     print("Installing WinUSB driver for VID=0x{:04X} PID=0x{:04X}...".format(VID, pid))
     print("If Windows warns about an unverified publisher, choose 'Install this driver anyway'.")
     r = subprocess.run(
@@ -139,10 +151,11 @@ def install_winusb_driver(pid):
          "--vid", "0x{:04X}".format(VID),
          "--pid", "0x{:04X}".format(pid),
          "--type", "0",
-         "--name", "Zebra WinUSB (zebra-wifi-tool)"],
+         "--name", "Zebra WinUSB (zebra-wifi-tool)",
+         "--dest", dest],
     )
     if r.returncode != 0:
-        sys.stderr.write("wdi-simple returned {}\n".format(r.returncode))
+        sys.stderr.write("wdi-simple returned {} (dest={})\n".format(r.returncode, dest))
         return False
     print("Driver installed. Waiting for Windows to rebind...")
     time.sleep(4)
