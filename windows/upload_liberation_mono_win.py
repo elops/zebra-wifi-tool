@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""
+Upload Liberation Mono TTFs to a Zebra printer's E: drive via raw USB (Windows).
+
+Mirrors upload_liberation_mono.py (Linux) but uses bundled libusb-1.0.dll and,
+when needed, bundled wdi-simple.exe to bind WinUSB to the printer on first run.
+
+Usage (after building with build.bat):
+    upload_liberation_mono.exe           # idempotent upload + verify
+    upload_liberation_mono.exe --test    # + print a fixed-width test label
+    upload_liberation_mono.exe --force   # re-upload unconditionally
+"""
+
+import ctypes
+import os
+import re
+import subprocess
+import sys
+import time
+
+VID = 0x0A5F
+DRIVE = "E"
+CHUNK = 16384
+
+FONTS = [
+    ("LiberationMono-Regular.ttf",    "LMONO.TTF"),
+    ("LiberationMono-Bold.ttf",       "LMONOB.TTF"),
+    ("LiberationMono-Italic.ttf",     "LMONOI.TTF"),
+    ("LiberationMono-BoldItalic.ttf", "LMONOBI.TTF"),
+]
+
+
+def resource_path(rel):
+    if getattr(sys, "frozen", False):
+        base = sys._MEIPASS
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, rel)
+
+
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+
+def elevate_self():
+    if getattr(sys, "frozen", False):
+        exe = sys.executable
+        params = subprocess.list2cmdline(sys.argv[1:])
+    else:
+        exe = sys.executable
+        params = subprocess.list2cmdline([os.path.abspath(sys.argv[0])] + sys.argv[1:])
+    rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 1)
+    return rc > 32
+
+
+def load_backend():
+    import usb.backend.libusb1
+    dll = resource_path("libusb-1.0.dll")
+    if not os.path.exists(dll):
+        sys.stderr.write("libusb-1.0.dll missing at {}\n".format(dll))
+        sys.exit(1)
+    be = usb.backend.libusb1.get_backend(find_library=lambda _: dll)
+    if be is None:
+        sys.stderr.write("Failed to initialise libusb backend.\n")
+        sys.exit(1)
+    return be
+
+
+def find_printer(backend):
+    import usb.core
+    return usb.core.find(idVendor=VID, backend=backend)
+
+
+def find_zebra_pid_via_pnp():
+    """Locate the Zebra's PID via Windows PnP (works even without WinUSB binding)."""
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-PnpDevice -PresentOnly | "
+             "Where-Object { $_.InstanceId -like '*VID_0A5F*' } | "
+             "Select-Object -ExpandProperty InstanceId"],
+            capture_output=True, text=True, timeout=15,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
+        )
+        for line in r.stdout.splitlines():
+            m = re.search(r"VID_0A5F&PID_([0-9A-Fa-f]{4})", line)
+            if m:
+                return int(m.group(1), 16)
+    except Exception as e:
+        sys.stderr.write("PnP enumeration failed: {}\n".format(e))
+    return None
+
+
+def install_winusb_driver(pid):
+    wdi = resource_path("wdi-simple.exe")
+    if not os.path.exists(wdi):
+        sys.stderr.write("wdi-simple.exe missing at {}\n".format(wdi))
+        return False
+    print("Installing WinUSB driver for VID=0x{:04X} PID=0x{:04X}...".format(VID, pid))
+    print("If Windows warns about an unverified publisher, choose 'Install this driver anyway'.")
+    r = subprocess.run(
+        [wdi,
+         "--vid", "0x{:04X}".format(VID),
+         "--pid", "0x{:04X}".format(pid),
+         "--type", "0",
+         "--name", "Zebra WinUSB (zebra-wifi-tool)"],
+    )
+    if r.returncode != 0:
+        sys.stderr.write("wdi-simple returned {}\n".format(r.returncode))
+        return False
+    print("Driver installed. Waiting for Windows to rebind...")
+    time.sleep(4)
+    return True
+
+
+def pause_and_exit(code=0):
+    try:
+        input("\nPress Enter to exit...")
+    except EOFError:
+        pass
+    sys.exit(code)
+
+
+def main():
+    if sys.platform != "win32":
+        sys.stderr.write("This build is Windows-only.\n")
+        sys.exit(1)
+
+    force = "--force" in sys.argv
+    test = "--test" in sys.argv
+
+    backend = load_backend()
+    dev = find_printer(backend)
+
+    if dev is None:
+        pid = find_zebra_pid_via_pnp()
+        if pid is None:
+            sys.stderr.write("No Zebra USB device (VID 0x0A5F) found. Is it plugged in and powered on?\n")
+            pause_and_exit(1)
+        print("Found Zebra at VID=0x{:04X} PID=0x{:04X} but libusb cannot access it.".format(VID, pid))
+        print("WinUSB driver needs to be installed (one-time).")
+        if not is_admin():
+            print("Requesting administrator rights...")
+            if not elevate_self():
+                sys.stderr.write("Elevation denied.\n")
+                pause_and_exit(1)
+            sys.exit(0)  # elevated child took over; this instance is done
+        if not install_winusb_driver(pid):
+            pause_and_exit(1)
+        dev = find_printer(backend)
+        for _ in range(10):
+            if dev is not None:
+                break
+            time.sleep(1)
+            dev = find_printer(backend)
+        if dev is None:
+            sys.stderr.write("Printer still not accessible after driver install.\n")
+            pause_and_exit(1)
+
+    try:
+        if dev.is_kernel_driver_active(0):
+            dev.detach_kernel_driver(0)
+    except Exception:
+        pass  # no-op on Windows/WinUSB
+
+    cfg = dev.get_active_configuration()
+    intf = cfg[(0, 0)]
+    out_ep, in_ep = intf[0], intf[1]
+
+    def drain():
+        try:
+            while True:
+                in_ep.read(65536, timeout=300)
+        except Exception:
+            pass
+
+    def read_quiet(idle_timeout=1500, max_idle=3):
+        import usb.core as _uc
+        buf = b""
+        idle = 0
+        while idle < max_idle:
+            try:
+                r = in_ep.read(65536, timeout=idle_timeout)
+                if r:
+                    buf += bytes(r)
+                    idle = 0
+                else:
+                    idle += 1
+            except _uc.USBError:
+                idle += 1
+        return buf
+
+    def write_chunked(data):
+        off = 0
+        while off < len(data):
+            n = out_ep.write(data[off:off + CHUNK])
+            off += (n if isinstance(n, int) and n > 0 else len(data[off:off + CHUNK]))
+
+    drain()
+    out_ep.write(b'! U1 getvar "device.unique_id"\r\n')
+    time.sleep(0.3)
+    serial = read_quiet(idle_timeout=800, max_idle=2).decode("latin-1", errors="ignore").strip().strip('"')
+    print("Printer: " + (serial or "unknown"))
+
+    line_re = re.compile(r"\*\s+([A-Z]):([A-Z0-9_.\-]+)\.TTF\s+(\d+)", re.IGNORECASE)
+
+    def list_ttfs():
+        drain()
+        out_ep.write("^XA^HW{}:*.TTF^XZ".format(DRIVE).encode())
+        time.sleep(0.5)
+        text = read_quiet(idle_timeout=1500, max_idle=3).decode("latin-1", errors="ignore")
+        return {m.group(2).upper() + ".TTF": int(m.group(3)) for m in line_re.finditer(text)}
+
+    print("\nChecking {}: drive...".format(DRIVE))
+    on_printer = list_ttfs()
+    if on_printer:
+        for name, size in sorted(on_printer.items()):
+            print("  already present: {}:{} ({} bytes)".format(DRIVE, name, size))
+    else:
+        print("  no TTFs on {}: drive".format(DRIVE))
+
+    print("\nUploading Liberation Mono to {}: drive{}...".format(
+        DRIVE, " (forced)" if force else ""))
+    uploaded = 0
+    skipped = 0
+    fonts_dir = resource_path("fonts")
+    for src_name, dst_name in FONTS:
+        src_path = os.path.join(fonts_dir, src_name)
+        if not os.path.exists(src_path):
+            print("  SKIP {} (not bundled)".format(src_name))
+            continue
+
+        host_size = os.path.getsize(src_path)
+        remote_size = on_printer.get(dst_name.upper())
+
+        if not force and remote_size == host_size:
+            print("  skip {}:{}  (already present, {} bytes)".format(DRIVE, dst_name, host_size))
+            skipped += 1
+            continue
+        if not force and remote_size is not None and remote_size != host_size:
+            print("  replace {}:{}  (on-printer={} vs host={})".format(
+                DRIVE, dst_name, remote_size, host_size))
+
+        with open(src_path, "rb") as f:
+            data = f.read()
+        obj = dst_name.rsplit(".", 1)[0]
+        header = "~DY{}:{},B,T,{},0,".format(DRIVE, obj, host_size).encode("latin-1")
+
+        drain()
+        out_ep.write(header)
+        t0 = time.time()
+        write_chunked(data)
+        out_ep.write(b"\r\n")
+        time.sleep(0.8)
+        print("  uploaded {} -> {}:{}  ({} bytes in {:.1f}s)".format(
+            src_name, DRIVE, dst_name, host_size, time.time() - t0))
+        uploaded += 1
+
+    print("\nSummary: uploaded={}, skipped={}".format(uploaded, skipped))
+
+    print("\nVerifying...")
+    on_printer = list_ttfs()
+    for _src, dst in FONTS:
+        src_path = os.path.join(fonts_dir, _src)
+        host_size = os.path.getsize(src_path) if os.path.exists(src_path) else None
+        remote = on_printer.get(dst.upper())
+        if remote is None:
+            print("  {}: MISSING".format(dst))
+        elif host_size and remote != host_size:
+            print("  {}: size mismatch on={} host={}".format(dst, remote, host_size))
+        else:
+            print("  {}: OK ({} bytes)".format(dst, remote))
+
+    if test:
+        print("\nPrinting test label (fixed-width verification)...")
+        zpl = (
+            "^XA^CI28^LH0,0"
+            "^FO20,20^A@N,30,30,E:LMONO.TTF^FD0123456789^FS"
+            "^FO20,60^A@N,30,30,E:LMONO.TTF^FDABCDEFGHIJ^FS"
+            "^FO20,100^A@N,30,30,E:LMONO.TTF^FDiiiiiiiiii^FS"
+            "^FO20,140^A@N,30,30,E:LMONO.TTF^FDWWWWWWWWWW^FS"
+            "^FO20,180^A@N,30,30,E:LMONO.TTF^FD\u010c\u0106\u017d\u0160\u0110\u010d\u0107\u017e\u0161\u0111^FS"
+            "^FO20,230^A@N,30,30,E:LMONOB.TTF^FDBold \u010c\u0106\u017d\u0160^FS"
+            "^FO20,270^A@N,30,30,E:LMONOI.TTF^FDItal \u010c\u0106\u017d\u0160^FS"
+            "^FO20,310^A@N,30,30,E:LMONOBI.TTF^FDBoIt \u010c\u0106\u017d\u0160^FS"
+            "^FO20,360^A@N,22,22,E:LMONO.TTF^FDPrinter: " + (serial or "?") + "^FS"
+            "^XZ"
+        )
+        out_ep.write(zpl.encode("utf-8"))
+        time.sleep(0.5)
+
+    print("\nDone.")
+    print("Use in ZPL:  ^FO50,50^A@N,40,40,E:LMONO.TTF^FDHello^FS")
+    pause_and_exit(0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as e:
+        sys.stderr.write("\nERROR: {}\n".format(e))
+        pause_and_exit(1)
