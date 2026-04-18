@@ -118,10 +118,27 @@ def install_winusb_driver(pid):
     return True
 
 
+def _probe_usable(dev):
+    """Return True if libusb can actually operate on this device (i.e. WinUSB is bound).
+
+    On Windows, libusb enumerates devices even when they are bound to an
+    incompatible driver (e.g. usbprint.sys for Zebra's inbox install).
+    find_printer() therefore returns a Device object, but any subsequent
+    operation raises LIBUSB_ERROR_NOT_SUPPORTED ("Operation not supported or
+    unimplemented on this platform"). Probing with get_active_configuration()
+    is enough to detect that case before we try to use the device.
+    """
+    try:
+        dev.get_active_configuration()
+        return True
+    except Exception:
+        return False
+
+
 def ensure_printer_ready(backend, product_id=None, product_name=None):
     """Locate printer, installing WinUSB driver via UAC if needed. Return pyusb Device or None."""
     dev = find_printer(backend, product_id=product_id)
-    if dev is not None:
+    if dev is not None and _probe_usable(dev):
         return dev
 
     pid = find_zebra_pid_via_pnp(want_pid=product_id)
@@ -146,7 +163,7 @@ def ensure_printer_ready(backend, product_id=None, product_name=None):
         return None
     for _ in range(10):
         dev = find_printer(backend, product_id=product_id)
-        if dev is not None:
+        if dev is not None and _probe_usable(dev):
             return dev
         time.sleep(1)
     sys.stderr.write("Printer still not accessible after driver install.\n")

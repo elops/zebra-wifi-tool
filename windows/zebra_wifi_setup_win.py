@@ -50,11 +50,11 @@ def detect_printer(backend):
     """Find a supported printer; install WinUSB driver one-time if needed."""
     for pid, name in SUPPORTED_PRINTERS.items():
         dev = zu.find_printer(backend, product_id=pid)
-        if dev is not None:
+        if dev is not None and zu._probe_usable(dev):
             print("Detected {} printer (USB product ID: {}).".format(name, hex(pid)))
             return dev, name
 
-    # Not visible via libusb — either not plugged in, or missing WinUSB binding.
+    # Not usable via libusb — either not plugged in, or WinUSB isn't bound yet.
     pid = zu.find_zebra_pid_via_pnp()
     if pid is None or pid not in SUPPORTED_PRINTERS:
         sys.stderr.write("No supported Zebra printer (ZD420/ZD421) found on USB.\n")
@@ -73,7 +73,7 @@ def detect_printer(backend):
         return None, None
     for _ in range(10):
         dev = zu.find_printer(backend, product_id=pid)
-        if dev is not None:
+        if dev is not None and zu._probe_usable(dev):
             return dev, name
         time.sleep(1)
     sys.stderr.write("Printer still not accessible after driver install.\n")
